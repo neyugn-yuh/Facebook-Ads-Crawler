@@ -1,0 +1,34 @@
+:root {
+  --bg: #f0f2f5; --card: #fff; --text: #1c1e21; --muted: #65676b; --border: #dadde1; --primary: #1877f2;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #18191a; --card: #242526; --text: #e4e6eb; --muted: #b0b3b8; --border: #3e4042; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; }
+.bar {
+  position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  padding: 8px 12px; background: var(--card); border-bottom: 1px solid var(--border);
+}
+.bar select { max-width: 360px; font: inherit; padding: 3px; }
+.muted { color: var(--muted); }
+.layout { display: grid; grid-template-columns: 1fr 340px; gap: 12px; padding: 12px; align-items: start; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+.stage-wrap { overflow: hidden; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+.stage { position: relative; transform-origin: 0 0; background: #fff; overflow: hidden; }
+.stage .shot { position: absolute; top: 0; left: 0; width: 100%; height: auto; pointer-events: none; z-index: 1; }
+.stage .wire { position: absolute; inset: 0; }
+.n { position: absolute; overflow: hidden; }
+.n.t { display: flex; white-space: nowrap; text-overflow: ellipsis; }
+.outlines .n { outline: 1px solid rgba(24, 119, 242, 0.25); }
+.outlines .n.asset { outline-color: rgba(250, 56, 62, 0.55); }
+.n.hl { outline: 2px solid #fa383e !important; z-index: 5; }
+.side { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 56px; max-height: calc(100vh - 70px); overflow: auto; }
+.side section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.side h3 { margin: 0 0 6px; font-size: 13px; }
+.kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px; padding: 2px 0; border-bottom: 1px dashed var(--border); }
+.kv span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.kv code { word-break: break-all; font-size: 12px; }
+.tree { font-family: ui-monospace, monospace; font-size: 12px; max-height: 420px; overflow: auto; }
+.tree-row { cursor: pointer; white-space: nowrap; padding: 1px 0; }
+.tree-row:hover { color: var(--primary); }

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UI Snapshot Viewer</title>
+  </head>
+  <body>
+    <header class="bar">
+      <b>UI Snapshot Viewer</b>
+      <select id="snap"></select>
+      <label><input type="radio" name="mode" value="overlay" checked /> Overlay</label>
+      <label><input type="radio" name="mode" value="wireframe" /> Wireframe</label>
+      <label><input type="radio" name="mode" value="screenshot" /> Screenshot</label>
+      <label title="Độ mờ screenshot khi overlay">Ảnh <input id="opacity" type="range" min="0" max="100" value="40" /></label>
+      <label><input id="outlines" type="checkbox" checked /> Viền node</label>
+      <span id="meta" class="muted"></span>
+    </header>
+    <main class="layout">
+      <div class="stage-wrap"><div id="stage" class="stage"></div></div>
+      <aside class="side">
+        <section>
+          <h3>Node</h3>
+          <div id="inspect" class="muted">Rê chuột lên wireframe để xem, click để ghim.</div>
+        </section>
+        <section>
+          <h3>Component tree</h3>
+          <div id="tree" class="tree"></div>
+        </section>
+      </aside>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
