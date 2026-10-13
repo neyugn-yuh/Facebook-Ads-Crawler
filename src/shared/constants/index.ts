@@ -18,7 +18,7 @@ export const DEFAULT_CONFIG: CrawlerConfig = {
   sanitizeDynamicData: true,
   collapseWrappers: true,
   trackMutations: true,
-  maxStatesPerRoute: 15,
+  maxStatesPerRoute: 150,
   redactTerms: [],
   targetUrlPatterns: [
     '^https://adsmanager\\.facebook\\.com/',

@@ -18,6 +18,8 @@ type Status = Omit<CrawlerStatus, 'tabId' | 'updatedAt'>;
 
 const INCREMENTAL_SAVE_INTERVAL = 3000;
 const MAX_INCREMENTAL_ROOTS = 25;
+const MAX_OVERLAY_TABS = 12;
+const MAX_MENU_PAGES = 30;
 
 export class Crawler {
   private sanitizer: DataSanitizer;
@@ -28,6 +30,8 @@ export class Crawler {
   private enabled = false;
   private forced = false;
   private crawling = false;
+  private deepDone = false; // popup hiện tại đã crawl sâu rồi (reset khi về state base)
+  private deepNote = '';
   private rerunReason: string | null = null;
   private dead = false;
   private lastSaveAt = 0;
@@ -100,39 +104,16 @@ export class Crawler {
       const route = routeFromUrl(url);
       const state = this.computeOverlayState();
 
-      // Screenshot trước khi scan để khớp nhất với rect
-      let captured = false;
-      let captureError: string | undefined;
-      if (this.cfg.captureScreenshot) {
-        this.report({ phase: 'crawling', progress: 2, message: 'Chụp screenshot…', route, state }, true);
-        const res = await this.send<CaptureResult>({ type: 'CAPTURE_SCREENSHOT' });
-        captured = !!res?.ok;
-        captureError = res?.error;
+      // Overlay có nhiều trang (tab) → crawl từng tab trước, rồi quay về tab đang mở để crawl state chính
+      if (state === 'base') this.deepDone = false;
+      else if (!this.deepDone) {
+        this.deepDone = true; // popup đổi state giữa chừng (dropdown...) không kích hoạt crawl sâu lần nữa
+        this.deepNote = '';
+        await this.crawlOverlayTabs(state, route);
+        await this.crawlMenuPages(state, route);
       }
 
-      this.sanitizer = new DataSanitizer(this.cfg);
-      this.scanner = new DOMScanner(this.cfg, this.sanitizer);
-      const nodes = await this.scanner.scan(document.body, ROOT_CONTEXT, (p) => {
-        this.report({
-          phase: 'crawling',
-          progress: Math.min(90, 5 + Math.round((p.visited / Math.max(1, p.total)) * 85)),
-          nodes: p.nodes,
-          message: `Scan DOM (${p.visited.toLocaleString()} element)`,
-        });
-      });
-
-      // Route đổi trong lúc scan → bỏ kết quả, crawl lại
-      if (routeFromUrl(location.href) !== route) {
-        this.rerunReason = 'route';
-        return;
-      }
-
-      this.root = nodes.length === 1 ? nodes[0] : this.syntheticRoot(nodes);
-      this.root.component = 'Page';
-      this.route = route;
-      this.stateKey = state;
-
-      await this.analyzeAndSave(captured, captureError, performance.now() - t0, !stable.stable);
+      if (!(await this.scanAndSave(route, state, state, t0, !stable.stable))) this.rerunReason = 'route';
     } catch (e) {
       this.report({ phase: 'error', message: String((e as Error)?.message ?? e) }, true);
     } finally {
@@ -142,6 +123,139 @@ export class Crawler {
       const rerun = this.rerunReason;
       this.rerunReason = null;
       if (rerun && !this.dead) void this.fullCrawl(rerun);
+    }
+  }
+
+  /** Screenshot + scan + lưu 1 snapshot với stateKey cho trước. false nếu route đổi giữa chừng. */
+  private async scanAndSave(route: string, reportState: string, stateKey: string, t0: number, timedOut: boolean): Promise<boolean> {
+    // Screenshot trước khi scan để khớp nhất với rect
+    let captured = false;
+    let captureError: string | undefined;
+    if (this.cfg.captureScreenshot) {
+      this.report({ phase: 'crawling', progress: 2, message: 'Chụp screenshot…', route, state: reportState }, true);
+      const res = await this.send<CaptureResult>({ type: 'CAPTURE_SCREENSHOT' });
+      captured = !!res?.ok;
+      captureError = res?.error;
+    }
+
+    this.sanitizer = new DataSanitizer(this.cfg);
+    this.scanner = new DOMScanner(this.cfg, this.sanitizer);
+    const nodes = await this.scanner.scan(document.body, ROOT_CONTEXT, (p) => {
+      this.report({
+        phase: 'crawling',
+        progress: Math.min(90, 5 + Math.round((p.visited / Math.max(1, p.total)) * 85)),
+        nodes: p.nodes,
+        message: `Scan DOM (${p.visited.toLocaleString()} element)`,
+      });
+    });
+
+    if (nodes.length) {
+      this.report({ phase: 'crawling', progress: 90, message: 'Cuộn các vùng scroll để lấy đủ nội dung…' }, true);
+      await this.scanner.expandScrollables(nodes);
+    }
+
+    // Route đổi trong lúc scan → bỏ kết quả
+    if (routeFromUrl(location.href) !== route) return false;
+
+    this.root = nodes.length === 1 ? nodes[0] : this.syntheticRoot(nodes);
+    this.root.component = 'Page';
+    this.route = route;
+    this.stateKey = stateKey;
+
+    await this.analyzeAndSave(captured, captureError, performance.now() - t0, timedOut);
+    return true;
+  }
+
+  /** Overlay (modal/popup) có nhiều tab → click lần lượt, mỗi tab lưu 1 snapshot `<state>-tab-<label>`. */
+  private async crawlOverlayTabs(state: string, route: string) {
+    const overlay = this.findTopOverlay();
+    if (!overlay) return;
+    const tabs = [...overlay.querySelectorAll<HTMLElement>('[role="tab"]')].filter(isVisible);
+    const active = tabs.find((t) => t.getAttribute('aria-selected') === 'true');
+    const others = tabs.filter((t) => t !== active).slice(0, MAX_OVERLAY_TABS);
+    if (!others.length) return;
+
+    const used = new Set<string>();
+    for (const [i, tab] of others.entries()) {
+      realClick(tab);
+      await this.waitQuiet();
+      if (!overlay.isConnected) break;
+      const label = slugify(this.sanitizer.applyPatterns(tab.textContent?.trim() ?? ''), 30) || `tab${i + 1}`;
+      const key = `${state}-tab-${used.has(label) ? label + (i + 1) : label}`;
+      used.add(label);
+      if (!(await this.scanAndSave(route, state, key, performance.now(), false))) break;
+    }
+    if (overlay.isConnected && active) {
+      realClick(active);
+      await this.waitQuiet();
+    }
+  }
+
+  /**
+   * Popup dạng menu nhiều trang (vd. popup lọc mở khi click ô tìm kiếm: trang gốc liệt kê danh mục,
+   * bấm danh mục → trang con có tiêu đề + nút quay lại). Về trang gốc, bấm lần lượt từng mục;
+   * mục nào dẫn sang trang con thì lưu snapshot `<state>-page-<tiêu đề>` rồi bấm quay lại.
+   */
+  private note(message: string) {
+    this.deepNote = message;
+    this.report({ phase: 'crawling', message }, true);
+  }
+
+  private async crawlMenuPages(state: string, route: string) {
+    // Overlay bị React render lại khi đổi trang → luôn tìm lại thay vì giữ tham chiếu cũ
+    // Bước sâu hơn (form chọn điều kiện/giá trị...) không có role menu/dialog → fallback về lớp nổi chứa popup
+    let anchor: Element | null = null;
+    const getOverlay = () => this.findTopOverlay(true) ?? (anchor?.isConnected && isVisible(anchor) ? anchor : null);
+    const first = getOverlay();
+    if (!first) return;
+    anchor = floatingAncestor(first);
+    const pageHeading = () => getOverlay()?.querySelector('[role="heading"]')?.textContent?.trim() ?? '';
+    const backButton = (): HTMLElement | null => {
+      const overlay = getOverlay();
+      const h = overlay?.querySelector('[role="heading"]');
+      for (let a = h?.parentElement; overlay && a && overlay.contains(a) && a !== overlay; a = a.parentElement) {
+        const b = a.querySelector<HTMLElement>('[role="button"]');
+        if (b && b.compareDocumentPosition(h!) & Node.DOCUMENT_POSITION_FOLLOWING) return b;
+      }
+      return null;
+    };
+    const items = () => [...(getOverlay()?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])].filter(isVisible);
+    const goBack = async () => {
+      realClick(backButton());
+      await this.waitQuiet();
+    };
+
+    /** Kết thúc (kể cả khi dừng giữa chừng): lùi về trang gốc để popup ở trạng thái ổn định. */
+    const restore = async () => {
+      for (let k = 0; k < 3 && backButton(); k++) await goBack();
+    };
+    try {
+    this.report({ phase: 'crawling', message: backButton() ? 'Popup: quay về trang gốc…' : 'Popup: đang ở trang gốc' }, true);
+    if (backButton()) await goBack(); // đang ở trang con → về trang gốc
+
+    const count = items().length;
+    const seen = new Set<string>();
+    for (let i = 0; i < Math.min(count, MAX_MENU_PAGES); i++) {
+      const item = items()[i];
+      if (!item) break;
+      const before = pageHeading();
+      this.note(`Popup: mở mục ${i + 1}/${count}`);
+      realClick(item);
+      await this.waitQuiet();
+      // Trang con có thể render trễ → chờ tối đa 3s trước khi kết luận
+      for (let w = 0; w < 30 && !backButton(); w++) await new Promise((r) => setTimeout(r, 100));
+      if (!getOverlay()) return; // click làm đóng popup (mục không phải điều hướng)
+      if (!backButton()) continue; // vẫn ở trang gốc → không phải điều hướng
+      const title = pageHeading();
+      const label = slugify(this.sanitizer.applyPatterns(title), 30) || `page${i + 1}`;
+      if (title !== before && !seen.has(label)) {
+        seen.add(label);
+        if (!(await this.scanAndSave(route, state, `${state}-page-${label}`, performance.now(), false))) return;
+      }
+      await goBack();
+    }
+    } finally {
+      await restore();
     }
   }
 
@@ -180,7 +294,7 @@ export class Crawler {
         tokens: snapshot.stats.tokens,
         screenshot: res?.hasScreenshot ?? false,
         message: res?.ok
-          ? `Đã lưu snapshot "${snapshot.id}"${snapshot.stats.truncated ? ' (đã cắt bớt vì vượt giới hạn node)' : ''}`
+          ? `Đã lưu snapshot "${snapshot.id}"${snapshot.stats.truncated ? ' (đã cắt bớt vì vượt giới hạn node)' : ''}${this.deepNote ? ` | bước popup cuối: ${this.deepNote}` : ''}`
           : `Lưu thất bại: ${res?.error ?? 'không rõ'}`,
       },
       true,
@@ -359,15 +473,22 @@ export class Crawler {
   // ─── Overlay state ───────────────────────────────────────────────────────
 
   /** "base" hoặc "<role>-<label>" của overlay trên cùng đang mở (modal, menu, dropdown). */
-  private computeOverlayState(): string {
+  /** `outermost`: popup lồng nhau (menu trong menu) → lấy lớp ngoài cùng, chứa cả tiêu đề + nút quay lại. */
+  private findTopOverlay(outermost = false): Element | null {
     const selector = OVERLAY_ROLES.map((r) => `[role="${r}"]`).join(',') + ',dialog[open]';
     let top: Element | null = null;
     for (const el of document.querySelectorAll(selector)) {
       if (!isVisible(el)) continue;
       const role = el.getAttribute('role') ?? 'dialog';
       if ((role === 'menu' || role === 'listbox') && !isFloating(el)) continue;
+      if (outermost && top?.contains(el)) continue;
       top = el;
     }
+    return top;
+  }
+
+  private computeOverlayState(): string {
+    const top = this.findTopOverlay();
     if (!top) return 'base';
     const role = top.getAttribute('role') ?? 'dialog';
     const label = overlayLabel(top);
@@ -406,7 +527,7 @@ export class Crawler {
 
 export function snapshotId(route: string, state: string): string {
   const base = slugify(route.replace(/:id/g, 'id'), 80);
-  return state === 'base' ? base : `${base}__${slugify(state, 50)}`;
+  return state === 'base' ? base : `${base}__${slugify(state, 150)}`;
 }
 
 /** Bỏ query string & số ID khỏi URL lưu trong snapshot. */
@@ -425,11 +546,32 @@ function countNodes(n: UINode): number {
   return c;
 }
 
+/** React/Facebook hay nghe pointer/mouse event, `el.click()` đơn thuần có thể không kích hoạt → phát đủ chuỗi sự kiện. */
+function realClick(el: HTMLElement | null | undefined) {
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  const init = { bubbles: true, cancelable: true, composed: true, view: window, button: 0, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
+  for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    el.dispatchEvent(t.startsWith('pointer') ? new PointerEvent(t, { ...init, pointerType: 'mouse', isPrimary: true }) : new MouseEvent(t, init));
+  }
+}
+
 function isVisible(el: Element): boolean {
   const anyEl = el as Element & { checkVisibility?: (o?: object) => boolean };
   if (anyEl.checkVisibility && !anyEl.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
   const r = el.getBoundingClientRect();
   return r.width > 0 && r.height > 0;
+}
+
+/** Tổ tiên gần nhất có position fixed/absolute và không phủ gần hết viewport (lớp chứa popup). */
+function floatingAncestor(el: Element): Element | null {
+  for (let a = el.parentElement, depth = 0; a && a !== document.body && depth < 12; a = a.parentElement, depth++) {
+    const p = getComputedStyle(a).position;
+    if (p !== 'fixed' && p !== 'absolute') continue;
+    const r = a.getBoundingClientRect();
+    return r.width < window.innerWidth * 0.6 || r.height < window.innerHeight * 0.6 ? a : null;
+  }
+  return null;
 }
 
 function isFloating(el: Element): boolean {

@@ -64,6 +64,8 @@ export interface UINode {
   sig?: string;
   /** Text trực tiếp của node (đã sanitize, cắt ngắn). */
   text?: string;
+  /** Vùng scroll: text của toàn bộ item (kể cả item nằm ngoài vùng nhìn thấy / list ảo hoá). */
+  scrollItems?: string[];
   attributes: Record<string, string>;
   /** Toạ độ so với viewport lúc chụp (khớp với screenshot). */
   rect: Rect;

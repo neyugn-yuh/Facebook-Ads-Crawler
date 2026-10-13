@@ -36,6 +36,15 @@ export interface ScanProgress {
 const YIELD_EVERY = 400;
 const yieldToMain = () => new Promise<void>((r) => setTimeout(r, 0));
 
+const MAX_SCROLLABLES = 30;
+const MAX_SCROLL_STEPS = 80;
+const settle = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 80)));
+
+function isScrollableY(el: HTMLElement): boolean {
+  if (el.scrollHeight - el.clientHeight <= 4) return false;
+  return /auto|scroll|overlay/.test(getComputedStyle(el).overflowY);
+}
+
 export const ROOT_CONTEXT: ScanContext = {
   depth: 0, dataRegion: false, parentInherited: null, parentDisplay: 'block', inHeader: false, inSidebar: false,
 };
@@ -80,6 +89,53 @@ export class DOMScanner {
     }
     onProgress?.({ visited: this.visited, nodes: this.nodeCount, total });
     return out;
+  }
+
+  /**
+   * Vùng có scroll (popup, dropdown, list ảo hoá...): cuộn từng bước, gom text của mọi item
+   * từng render ra → node.scrollItems. Khôi phục vị trí scroll sau khi xong.
+   */
+  async expandScrollables(roots: UINode[]): Promise<void> {
+    const targets: { node: UINode; el: HTMLElement }[] = [];
+    const walk = (n: UINode) => {
+      const el = this.meta.get(n)?.el as HTMLElement | undefined;
+      if (el && el !== document.body && el !== document.documentElement && isScrollableY(el)) targets.push({ node: n, el });
+      n.children.forEach(walk);
+    };
+    roots.forEach(walk);
+
+    for (const { node, el } of targets.slice(0, MAX_SCROLLABLES)) {
+      const ctx = this.meta.get(node)!.ctx;
+      const seen = new Set<string>();
+      const items: string[] = [];
+      const collect = () => {
+        for (const leaf of el.querySelectorAll('*')) {
+          if (leaf.childElementCount || IGNORED_TAGS.has(leaf.localName)) continue;
+          const raw = (leaf.textContent ?? '').replace(/\s+/g, ' ').trim();
+          if (!raw) continue;
+          const t = this.sanitizer.text(node, raw, { dataRegion: ctx.dataRegion });
+          if (!seen.has(t)) {
+            seen.add(t);
+            items.push(t);
+          }
+        }
+      };
+
+      const origTop = el.scrollTop;
+      const step = Math.max(40, el.clientHeight * 0.8);
+      el.scrollTop = 0;
+      for (let i = 0; i < MAX_SCROLL_STEPS; i++) {
+        await settle();
+        collect();
+        const before = el.scrollTop;
+        el.scrollTop = before + step;
+        if (el.scrollTop === before) break; // chạm đáy
+      }
+      await settle();
+      collect();
+      el.scrollTop = origTop;
+      if (items.length) node.scrollItems = items;
+    }
   }
 
   private pushChildren(el: Element, parent: UINode | null, ctx: ScanContext, stack: StackItem[]) {
